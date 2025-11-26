@@ -1,0 +1,106 @@
+pipeline {
+    agent any
+
+    environment {
+        APP_SERVER = "ubuntu@APP_SERVER_IP"
+        DB_SERVER  = "ubuntu@DB_SERVER_IP"
+        SSH_ID     = "APP_SERVER_SSH"
+        JAR_NAME   = "app.jar"
+        TARGET_DIR = "/home/ubuntu/app"
+        PORT       = "8088"     // Updated App Server Port
+        DB_PORT    = "3306"     // DB Server Port
+    }
+
+    stages {
+
+        stage('Build') {
+            steps {
+                echo "Stage: Build Started"
+
+                sh 'mvn clean package -DskipTests'
+
+                echo "POST: Build Completed"
+            }
+        }
+
+        stage('Upload to App Server') {
+            steps {
+                echo "Stage: Upload Started"
+
+                sh """
+                scp -o StrictHostKeyChecking=no \\
+                    target/${JAR_NAME} \\
+                    ${APP_SERVER}:${TARGET_DIR}/
+                """
+
+                echo "POST: Upload Completed"
+            }
+        }
+
+        stage('Kill Previous Process') {
+            steps {
+                echo "Stage: Kill Previous Process"
+
+                sh """
+                ssh -o StrictHostKeyChecking=no ${APP_SERVER} '
+                    PID=\$(pgrep -f "${JAR_NAME}" || true)
+                    if [ ! -z "\$PID" ]; then
+                        echo "Killing old process: \$PID"
+                        kill -9 \$PID
+                    else
+                        echo "No previous process found"
+                    fi
+                '
+                """
+
+                echo "POST: Kill Completed"
+            }
+        }
+
+        stage('Start New App') {
+            steps {
+                echo "Stage: Start App"
+
+                sh """
+                ssh -o StrictHostKeyChecking=no ${APP_SERVER} '
+                    nohup java -jar ${TARGET_DIR}/${JAR_NAME} --server.port=${PORT} > app.log 2>&1 &
+                    echo "Started new process on port ${PORT}"
+                '
+                """
+
+                echo "POST: Start App Completed"
+            }
+        }
+
+        stage('Verify App Running') {
+            steps {
+                echo "Stage: Health Check"
+
+                sh """
+                sleep 10
+                STATUS=\$(curl -s -o /dev/null -w "%{http_code}" http://${APP_SERVER_IP}:${PORT})
+                echo "Health Check Status: \$STATUS"
+                """
+
+                echo "POST: Health Check Completed"
+            }
+        }
+
+        stage('DB Store Action') {
+            steps {
+                echo "Stage: Store Pipeline Data in DB"
+
+                sh """
+                ssh ${DB_SERVER} '
+                    mysql -h ${DB_SERVER_IP} -P ${DB_PORT} -u root -proot -D cicd -e "
+                        INSERT INTO pipeline_log(message, build_id, created_at)
+                        VALUES (\"Build ${BUILD_NUMBER} completed\", ${BUILD_NUMBER}, NOW());
+                    "
+                '
+                """
+
+                echo "POST: DB Entry Completed"
+            }
+        }
+    }
+}
